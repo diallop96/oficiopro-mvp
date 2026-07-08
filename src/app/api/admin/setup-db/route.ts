@@ -23,6 +23,8 @@ async function runMigration() {
     'utf8'
   );
 
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
   const client = new pg.Client({
     connectionString,
     ssl: { rejectUnauthorized: false },
@@ -203,6 +205,8 @@ async function enableRealtime() {
 
   if (!connectionString) return;
 
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
   const client = new pg.Client({ connectionString, ssl: { rejectUnauthorized: false } });
   await client.connect();
   try {
@@ -217,32 +221,59 @@ async function enableRealtime() {
   }
 }
 
+export async function GET() {
+  return NextResponse.json({
+    endpoint: '/api/admin/setup-db',
+    method: 'POST',
+    auth: 'Authorization: Bearer <SETUP_SECRET>',
+    steps: ['migrate', 'buckets', 'seed', 'realtime'],
+    query: '?only=buckets,seed — omitir migración si ya corriste el SQL en Supabase',
+    manual_sql: 'supabase/migrations/001_initial_schema.sql',
+    maintenance: 'supabase/maintenance.sql',
+  });
+}
+
 export async function POST(req: Request) {
   const auth = req.headers.get('authorization');
   if (auth !== `Bearer ${SETUP_SECRET}`) {
     return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
   }
 
+  const url = new URL(req.url);
+  const only = url.searchParams.get('only')?.split(',').map((s) => s.trim()) ?? null;
+  const run = (step: string) => !only || only.includes(step);
+
   try {
     const steps: string[] = [];
 
-    await runMigration();
-    steps.push('Migración SQL aplicada');
+    if (run('migrate')) {
+      await runMigration();
+      steps.push('Migración SQL aplicada');
+    }
 
-    await ensureBuckets();
-    steps.push('Buckets de storage verificados');
+    if (run('buckets')) {
+      await ensureBuckets();
+      steps.push('Buckets de storage verificados');
+    }
 
-    const created = await seedDemoUsers();
-    steps.push(`Usuarios demo: ${created.length ? created.join(', ') : 'ya existían'}`);
+    if (run('seed')) {
+      const created = await seedDemoUsers();
+      steps.push(`Usuarios demo: ${created.length ? created.join(', ') : 'ya existían'}`);
+    }
 
-    await enableRealtime();
-    steps.push('Realtime habilitado para chat_messages');
+    if (run('realtime')) {
+      await enableRealtime();
+      steps.push('Realtime habilitado para chat_messages');
+    }
 
     return NextResponse.json({ success: true, steps });
   } catch (error) {
     console.error('Setup DB error:', error);
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Error en setup' },
+      {
+        error: error instanceof Error ? error.message : 'Error en setup',
+        hint: 'Si la migración falla, ejecutá supabase/migrations/001_initial_schema.sql en Supabase SQL Editor y llamá POST ?only=buckets,seed,realtime',
+      },
       { status: 500 }
     );
   }
